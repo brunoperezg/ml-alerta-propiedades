@@ -1,15 +1,15 @@
 import os
 import time
-import re
+import json
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
-# ====== TELEGRAM (GitHub Secrets) ======
+# ====== TELEGRAM ======
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ====== PORTAL INMOBILIARIO (UF 40–55) ======
+# ====== URLs PortalInmobiliario (UF 40–55) ======
 URLS = [
     (
         "Las Condes",
@@ -28,9 +28,6 @@ HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
 }
 
 MAX_LINKS_PER_COMUNA = 30
@@ -39,45 +36,56 @@ SLEEP_SECONDS = 1
 
 def telegram_send(message: str) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        raise RuntimeError("Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en GitHub Secrets.")
+        raise RuntimeError("Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID.")
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=30)
     r.raise_for_status()
 
 
-def extract_links_portalinmobiliario(base_url: str, html: str) -> list[str]:
+def extract_links_from_embedded_json(base_url: str, html: str) -> list[str]:
     """
-    Extrae links de publicaciones desde PortalInmobiliario.
-    Tomamos anchors <a href> y filtramos los que parezcan avisos.
+    PortalInmobiliario incluye los avisos en un JSON dentro de un <script>.
+    Buscamos ese JSON y extraemos las URLs de las publicaciones.
     """
     soup = BeautifulSoup(html, "html.parser")
 
+    scripts = soup.find_all("script")
     links = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        abs_url = urljoin(base_url, href)
-        abs_url = abs_url.split("#")[0]
 
-        # Portal Inmobiliario suele tener avisos con /MLC- o /MLC... en MercadoLibre,
-        # pero aquí normalmente son rutas tipo /MLC-... o /<slug>_... en portalinmobiliario.com
-        # Filtramos por dominio + que no sea navegación (arriendo/casa/... ya es navegación)
-        if "portalinmobiliario.com" in abs_url:
-            # Evitar links al mismo listado o filtros
-            if "/arriendo/" in abs_url and "/_PriceRange_" in abs_url:
+    for script in scripts:
+        if not script.string:
+            continue
+
+        text = script.string.strip()
+
+        # Heurística: el JSON suele contener "listingId" o "canonical_url"
+        if "listingId" in text or "canonical_url" in text or "permalink" in text:
+            try:
+                data = json.loads(text)
+
+                # Buscamos recursivamente URLs
+                stack = [data]
+                while stack:
+                    item = stack.pop()
+                    if isinstance(item, dict):
+                        for k, v in item.items():
+                            if isinstance(v, (dict, list)):
+                                stack.append(v)
+                            elif isinstance(v, str):
+                                if "portalinmobiliario.com" in v and "/arriendo/" in v:
+                                    links.append(v)
+                    elif isinstance(item, list):
+                        stack.extend(item)
+
+            except Exception:
                 continue
 
-            # Heurísticas de “aviso”: suele incluir identificadores o path distinto al listado
-            # (esto es intencionalmente flexible)
-            if re.search(r"/(MLC|PM|inmueble|propiedad|aviso|casa|departamento)", abs_url, re.IGNORECASE) or (
-                abs_url.count("/") > 5
-            ):
-                links.append(abs_url)
-
-    # Deduplicar preservando orden
-    seen = set()
+    # Normalizar y deduplicar
     uniq = []
+    seen = set()
     for x in links:
-        x = x.split("?")[0]
+        x = x.split("?")[0].split("#")[0]
+        x = urljoin(base_url, x)
         if x not in seen:
             seen.add(x)
             uniq.append(x)
@@ -85,15 +93,16 @@ def extract_links_portalinmobiliario(base_url: str, html: str) -> list[str]:
     return uniq
 
 
-def fetch_listing_links(label: str, url: str) -> tuple[list[str], str]:
+def fetch_links(url: str) -> tuple[list[str], str]:
     r = requests.get(url, headers=HEADERS, timeout=30)
     status = r.status_code
     html = r.text
     diag = f"HTTP {status}, html_len={len(html)}"
+
     if status != 200:
         return [], diag
 
-    links = extract_links_portalinmobiliario(url, html)
+    links = extract_links_from_embedded_json(url, html)
     return links, diag
 
 
@@ -103,17 +112,18 @@ def main():
 
     for label, url in URLS:
         try:
-            links, diag = fetch_listing_links(label, url)
+            links, diag = fetch_links(url)
             links = links[:MAX_LINKS_PER_COMUNA]
 
             lines.append(f"📍 {label} — encontrados: {len(links)} ({diag})")
             if not links:
-                lines.append("  (Sin links extraídos)")
+                lines.append("  (No se pudieron extraer links)")
             else:
                 for link in links:
                     lines.append(f"- {link}")
 
             total += len(links)
+
         except Exception as e:
             lines.append(f"📍 {label} — ERROR: {e}")
 
