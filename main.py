@@ -9,15 +9,15 @@ from urllib.parse import urljoin
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ====== URLs filtradas (UF 40–55) ======
+# ====== PORTAL INMOBILIARIO (UF 40–55) ======
 URLS = [
     (
         "Las Condes",
-        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/las-condes/_PriceRange_40CLF-55CLF_NoIndex_True",
+        "https://www.portalinmobiliario.com/arriendo/casa/las-condes-metropolitana/_PriceRange_40CLF-55CLF_NoIndex_True",
     ),
     (
         "Providencia",
-        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/providencia/_PriceRange_40CLF-55CLF_NoIndex_True",
+        "https://www.portalinmobiliario.com/arriendo/casa/providencia-metropolitana/_PriceRange_40CLF-55CLF_NoIndex_True",
     ),
 ]
 
@@ -27,20 +27,14 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
 }
 
 MAX_LINKS_PER_COMUNA = 30
 SLEEP_SECONDS = 1
-
-# patrones típicos de links de items en Mercado Libre Chile
-ITEM_PATTERNS = [
-    re.compile(r"/MLC-\d+"),          # /MLC-123456789
-    re.compile(r"MLC-\d+"),           # MLC-123456789 (en cualquier parte)
-]
 
 
 def telegram_send(message: str) -> None:
@@ -51,47 +45,39 @@ def telegram_send(message: str) -> None:
     r.raise_for_status()
 
 
-def looks_blocked(html: str) -> bool:
-    """Heurística simple de bloqueo/anti-bot."""
-    h = html.lower()
-    keywords = [
-        "captcha", "robot", "no eres un robot", "verifica", "blocked", "access denied",
-        "perimeterx", "px-captcha", "challenge", "unusual traffic"
-    ]
-    return any(k in h for k in keywords)
-
-
-def extract_links_from_html(base_url: str, html: str) -> list[str]:
+def extract_links_portalinmobiliario(base_url: str, html: str) -> list[str]:
+    """
+    Extrae links de publicaciones desde PortalInmobiliario.
+    Tomamos anchors <a href> y filtramos los que parezcan avisos.
+    """
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1) Primero: links directos típicos del listado (más confiable)
-    # Muchos listados usan anchors con clases específicas.
-    # Tomamos todos los <a href> y filtramos por patrón.
-    raw_hrefs = []
-    for a in soup.find_all("a", href=True):
-        raw_hrefs.append(a["href"])
-
-    # 2) Normalizar (absolutos) + filtrar por patrones de item
     links = []
-    for href in raw_hrefs:
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
         abs_url = urljoin(base_url, href)
         abs_url = abs_url.split("#")[0]
 
-        if any(p.search(abs_url) for p in ITEM_PATTERNS):
-            links.append(abs_url)
+        # Portal Inmobiliario suele tener avisos con /MLC- o /MLC... en MercadoLibre,
+        # pero aquí normalmente son rutas tipo /MLC-... o /<slug>_... en portalinmobiliario.com
+        # Filtramos por dominio + que no sea navegación (arriendo/casa/... ya es navegación)
+        if "portalinmobiliario.com" in abs_url:
+            # Evitar links al mismo listado o filtros
+            if "/arriendo/" in abs_url and "/_PriceRange_" in abs_url:
+                continue
 
-    # 3) Si no encontramos nada, intentamos un fallback:
-    # buscar strings "MLC-123..." en el HTML y reconstruir links
-    if not links:
-        ids = set(re.findall(r"MLC-\d+", html))
-        for item_id in list(ids)[:200]:
-            links.append(f"https://articulo.mercadolibre.cl/{item_id}")
+            # Heurísticas de “aviso”: suele incluir identificadores o path distinto al listado
+            # (esto es intencionalmente flexible)
+            if re.search(r"/(MLC|PM|inmueble|propiedad|aviso|casa|departamento)", abs_url, re.IGNORECASE) or (
+                abs_url.count("/") > 5
+            ):
+                links.append(abs_url)
 
     # Deduplicar preservando orden
     seen = set()
     uniq = []
     for x in links:
-        x = x.split("?")[0]  # limpia tracking
+        x = x.split("?")[0]
         if x not in seen:
             seen.add(x)
             uniq.append(x)
@@ -99,54 +85,44 @@ def extract_links_from_html(base_url: str, html: str) -> list[str]:
     return uniq
 
 
-def fetch_listing_links(url: str) -> tuple[list[str], str]:
-    """
-    Devuelve (links, diagnostico_texto).
-    diagnostico_texto se usa para entender por qué a veces hay 0 resultados.
-    """
+def fetch_listing_links(label: str, url: str) -> tuple[list[str], str]:
     r = requests.get(url, headers=HEADERS, timeout=30)
     status = r.status_code
     html = r.text
-
     diag = f"HTTP {status}, html_len={len(html)}"
-
     if status != 200:
-        return [], f"{diag} (no 200)"
+        return [], diag
 
-    if looks_blocked(html):
-        return [], f"{diag} (posible bloqueo/anti-bot detectado)"
-
-    links = extract_links_from_html(url, html)
+    links = extract_links_portalinmobiliario(url, html)
     return links, diag
 
 
 def main():
-    lines = ["🏠 Casas en arriendo — UF 40 a UF 55\n"]
-    total_links = 0
+    lines = ["🏠 PortalInmobiliario — Casas en arriendo — UF 40 a UF 55\n"]
+    total = 0
 
     for label, url in URLS:
         try:
-            links, diag = fetch_listing_links(url)
+            links, diag = fetch_listing_links(label, url)
             links = links[:MAX_LINKS_PER_COMUNA]
 
-            lines.append(f"📍 {label} — encontrados: {len(links)}  ({diag})")
+            lines.append(f"📍 {label} — encontrados: {len(links)} ({diag})")
             if not links:
-                lines.append("  (Sin links extraídos. Si esto pasa siempre, es bloqueo o cambió el HTML.)")
+                lines.append("  (Sin links extraídos)")
             else:
                 for link in links:
                     lines.append(f"- {link}")
 
-            total_links += len(links)
-
+            total += len(links)
         except Exception as e:
             lines.append(f"📍 {label} — ERROR: {e}")
 
         lines.append("")
         time.sleep(SLEEP_SECONDS)
 
-    lines.insert(1, f"Total links (mostrados): {total_links}\n")
+    lines.insert(1, f"Total links (mostrados): {total}\n")
     telegram_send("\n".join(lines))
-    print(f"Mensaje enviado. Total mostrados: {total_links}")
+    print(f"Mensaje enviado. Total mostrados: {total}")
 
 
 if __name__ == "__main__":
