@@ -7,15 +7,15 @@ from bs4 import BeautifulSoup
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ====== URLs filtradas (Publicados hoy) ======
+# ====== URLs filtradas (UF 40–55) ======
 URLS = [
     (
         "Las Condes",
-        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/las-condes/_PublishedToday_YES_NoIndex_True",
+        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/las-condes/_PriceRange_40CLF-55CLF_NoIndex_True",
     ),
     (
         "Providencia",
-        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/providencia/_PublishedToday_YES_NoIndex_True",
+        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/providencia/_PriceRange_40CLF-55CLF_NoIndex_True",
     ),
 ]
 
@@ -29,21 +29,23 @@ HEADERS = {
     "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
 }
 
+MAX_LINKS_PER_COMUNA = 30  # evita mensajes enormes
+SLEEP_SECONDS = 1
+
 
 def telegram_send(message: str) -> None:
     """Envía un mensaje a Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError("Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID en GitHub Secrets.")
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=30)
     r.raise_for_status()
 
 
-def fetch_listings(label: str, url: str) -> list[str]:
+def fetch_listing_links(url: str) -> list[str]:
     """
     Descarga el HTML del listado y extrae links a publicaciones.
-    Devuelve una lista de URLs (máximo 80).
+    Devuelve una lista de URLs (deduplicada, preservando orden).
     """
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
@@ -54,10 +56,8 @@ def fetch_listings(label: str, url: str) -> list[str]:
     for a in soup.find_all("a", href=True):
         href = a["href"]
 
-        # Normalmente los links de publicaciones en MercadoLibre contienen MLC-
-        # Ajuste suave (no demasiado estricto para tolerar cambios de HTML)
+        # Links de publicaciones suelen contener MLC- (Chile)
         if "mercadolibre.cl" in href and ("MLC-" in href or "/MLC" in href):
-            # quitar fragmentos (#...) para que quede limpio
             clean = href.split("#")[0]
             links.append(clean)
 
@@ -69,46 +69,30 @@ def fetch_listings(label: str, url: str) -> list[str]:
             seen.add(x)
             uniq.append(x)
 
-    return uniq[:80]
+    return uniq
 
 
 def main():
-    resultados = []
+    # Construimos el mensaje en 2 bloques (Las Condes / Providencia)
+    lines = ["🏠 Casas en arriendo — UF 40 a UF 55\n"]
+
+    total_links = 0
 
     for label, url in URLS:
         try:
-            links = fetch_listings(label, url)
-            for link in links:
-                resultados.append((label, link))
+            links = fetch_listing_links(url)
+            # recortamos por comuna para no saturar
+            links = links[:MAX_LINKS_PER_COMUNA]
+
+            lines.append(f"📍 {label} — mostrando {len(links)}")
+            if not links:
+                lines.append("  (Sin resultados)")
+            else:
+                for link in links:
+                    lines.append(f"- {link}")
+
+            total_links += len(links)
         except Exception as e:
-            # Si falla una comuna, seguimos con la otra
-            resultados.append((label, f"ERROR al consultar listado: {e}"))
-        time.sleep(1)
+            lines.append(f"📍 {label} — ERROR al consultar listado: {e}")
 
-    # Siempre enviamos algo
-    if not resultados:
-        telegram_send("Hoy no hay publicaciones (Publicados hoy) para Las Condes / Providencia.")
-        print("Enviado: 0 resultados.")
-        return
-
-    # Armar mensaje (máximo 30 líneas para no saturar Telegram)
-    msg = [f"📌 Publicados HOY — resultados: {len(resultados)}\n"]
-    count_links = 0
-
-    for label, link in resultados:
-        # si es un error, igual lo mostramos
-        if link.startswith("ERROR"):
-            msg.append(f"[{label}] {link}")
-            continue
-
-        msg.append(f"[{label}] {link}")
-        count_links += 1
-        if count_links >= 30:
-            break
-
-    telegram_send("\n".join(msg))
-    print(f"Enviado: {len(resultados)} resultados (mostrando hasta 30).")
-
-
-if __name__ == "__main__":
-    main()
+        lines.append("")  # línea en
