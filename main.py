@@ -14,14 +14,13 @@ SEEN_FILE = "seen.txt"
 URLS = [
     (
         "Las Condes",
-        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/las-condes/_PriceRange_40CLF-55CLF_NoIndex_True"
+        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/las-condes/_PublishedToday_YES_NoIndex_True"
     ),
     (
         "Providencia",
-        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/providencia/_PriceRange_40CLF-55CLF_NoIndex_True"
+        "https://listado.mercadolibre.cl/inmuebles/casas/arriendo/rm-metropolitana/providencia/_PublishedToday_YES_NoIndex_True"
     ),
 ]
-
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
