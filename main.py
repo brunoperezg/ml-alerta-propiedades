@@ -32,7 +32,21 @@ def ml_search(q: str):
     params = {"q": q, "limit": LIMIT}
     if CATEGORY:
         params["category"] = CATEGORY
-    r = requests.get(url, params=params, timeout=30)
+
+    # Headers para evitar 403 desde runners (datacenter)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+        "Referer": "https://www.mercadolibre.cl/",
+    }
+
+    r = requests.get(url, params=params, headers=headers, timeout=30)
+
+    # Si igual bloquea, muestra el status y un pedacito del body para diagnóstico
+    if r.status_code == 403:
+        raise RuntimeError(f"403 Forbidden desde ML. Body (corto): {r.text[:200]}")
+
     r.raise_for_status()
     return r.json()
 
