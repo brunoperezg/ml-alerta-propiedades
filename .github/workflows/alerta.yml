@@ -1,12 +1,10 @@
 name: Alerta Propiedades ML
 
 on:
-  schedule:
-    # GitHub Actions usa UTC.
-    # 09:00 Chile (UTC-3) -> 12:00 UTC
-    - cron: "0 12 * * *"
-    # 18:00 Chile (UTC-3) -> 21:00 UTC
-    - cron: "0 21 * * *"
+schedule:
+  - cron: "0 12 * * *"  # 09:00 Chile (UTC-3)
+  - cron: "0 15 * * *"  # 12:00 Chile (UTC-3)
+  - cron: "0 21 * * *"  # 18:00 Chile (UTC-3)
   workflow_dispatch: {}
 
 jobs:
